@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+help() {
+    cat <<EOF
+dozctl [COMMAND] [ARGS]
+Launch firecracker VMs from configuration templates with networks
+managed by CNI. VM configuration is stored in $VM_CONFIG_DIR
+and network configuration is stored in $NET_CONFIG_DIR
+Commands:
+ create: Create a new firecracker VM with a network.
+ destroy: Destroy a firecracker VM and its associated network.
+Arguments:
+ --id       ID of the VM. This ID will be shared with the network.
+            Temporary VMs should always use a UUID.
+ --cni      CNI configuration ID for the VM, which implies a CNI config
+            in $CNI_CONFIG_DIR with that name. Defaults to "firecracker".
+ --template VM configuration template. The MAC address and IP address
+            will be interpolated with the output from the CNI network
+            configuration. Defaults to $VM_CONFIG_DIR/config.json.
+Extra commands:
+ create-network:  Create the network for a VM only.
+ destroy-network: Destroy an existing network.
+EOF
+
+}
+
+# paths
+CHROOT_BASE="/srv/vm/jailer"
+VM_CONFIG_DIR="/srv/vm/configs"
+NET_CONFIG_DIR="/srv/vm/networks"
+FILESYSTEMS_DIR="/srv/vm/filesystems"
+KERNELS_DIR="/srv/vm/kernels"
+NET_NS_DIR="/var/run/netns"
+CNI_CONFIG_DIR="/etc/cni/net.d"
+
+# args set by command line flags
+cni="firecracker"
+id=""
+template=""
+
+
+errexit() {
+    echo "$1"
+    exit 1
+}
+
+check() {
+    command -v cnitool > /dev/null || errexit "missing cnitool"
+    command -v firecracker > /dev/null || errexit "missing firecracker"
+    command -v jailer > /dev/null || errexit "missing jailer"
+
+    if [ ! -d /srv/vm ]; then
+        sudo mkdir /srv/vm
+        sudo chown -R dozman:dozman /srv/vm
+        mkdir -p /srv/vm/{configs,filesystems,kernels,linux.git,networks,jailer}
+    fi
+
+    if [ ! -d "$CNI_CONFIG_DIR" ]; then
+        errexit "missing $CNI_CONFIG_DIR"
+    fi
+}
+
+    # see https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/networking_guide/sec-configuring_ip_networking_from_the_kernel_command_line
+    # ip<client-IP-number>:[<server-id>]:<gateway-IP-number>:<netmask>:<client-hostname>:<interface>:{dhcp|dhcp6|auto6|on|any|none|off}
+create-vm-config() {
+    if [ -z "$template" ]; then
+        errexit "creating the VM config requires a --template"
+    fi
+    if [ -z "$id" ]; then
+        errexit "creating the VM config requires a VM ID"
+    fi
+
+    if [ ! -f "${NET_CONFIG_DIR}/${id}.json" ]; then
+        errexit "network configuration for $id not found"
+    fi
+
+    if [ ! -f "$template" ]; then
+        errexit "could not find VM config template $template"
+    fi
+
+    sudo cp "$template" "${VM_CONFIG_DIR}/${id}.json"
+
+    local boot_args mask mac ip gateway_ip _netcfg
+
+    # Extracting the value of the network configuration created
+
+    _netcfg="${NET_CONFIG_DIR}/${id}.json"
+
+    mac=$(jq -r '.interfaces[] | select(.name == "eth0").mac' < "$_netcfg")
+    ip=$(jq -r '.ips[0].address | rtrimstr("/24")' < "$_netcfg")
+    gateway_ip=$(jq -r '.ips[0].gateway' < "$_netcfg")
+    mask="255.255.255.0"
+    hostname=$(echo "$id" | tr -d '-' | head -c 16)
+
+    boot_args="console=ttyS0 reboot=k panic=1 pci=off"
+    boot_args="${boot_args} ip=${ip}::${gateway_ip}:${mask}:${hostname}:eth0:off"
+
+    jq "(.\"boot-source\".boot_args) |= \"$boot_args\"
+        | (.\"network-interfaces\"[0].guest_mac) |= \"$mac\"
+          " < "$template" | \
+              sudo tee "${VM_CONFIG_DIR}/${id}.json"
+}
+
+    # all filesystem objects that the VM needs must be within the jailer chroot,
+    # so hardlink them there
+    # TODO: probably would be a good idea to enforce 1 hardlink per rootfs
+create-hardlinks() {
+    if [ -z "$id" ]; then
+        errexit "create-hardlinks requires a VM ID"
+    fi
+
+    local kernel_path initrd_path rootfs_path other_paths path base
+
+    base="${CHROOT_BASE}/firecracker/${id}/root"
+    sudo mkdir -p "$base"
+    sudo chown jailer:jailer "$base"
+
+    kernel_path=$(jq -r '."boot-source".kernel_image_path' < "$template")
+    initrd_path=$(jq -r '."boot-source".initrd_path' < "$template")
+    rootfs_path=$(jq -r '."drives"[] | select(.is_root_device == true).path_on_host' \
+                     < "$template")
+    other_paths=$(jq -r '."drives"[] | select(.is_root_device == true).path_on_host' \
+                     < "$template")
+
+    if sudo [ ! -f "${base}/${kernel_path}" ]; then
+        sudo ln "${KERNELS_DIR}/${kernel_path}" "${base}/${kernel_path}"
+        sudo chown jailer:jailer "${base}/${kernel_path}"
+    fi
+
+    if sudo [ ! -f "${base}/${rootfs_path}" ]; then
+        sudo ln "${FILESYSTEMS_DIR}/${rootfs_path}" "${base}/${rootfs_path}"
+        sudo chown jailer:jailer "${base}/${rootfs_path}"
+    fi
+
+    if [ "$initrd_path" != "null" ] && sudo [ ! -f "${base}/${initrd_path}" ]; then
+        sudo ln "${FILESYSTEMS_DIR}/${initrd_path}" "${base}/${initrd_path}"
+        sudo chown jailer:jailer "${base}/${initrd_path}"
+    fi
+
+    for path in $other_paths; do
+        if [ "$path" != "" ] && sudo [ ! -f "${base}/${path}" ]; then
+            sudo ln "${FILESYSTEMS_DIR}/${path}" "${base}/${path}"
+            sudo chown jailer:jailer "${base}/${path}"
+        fi
+    done
+
+    if sudo [ ! -f "${base}/config.json" ]; then
+        sudo ln "${VM_CONFIG_DIR}/${id}.json" "${base}/config.json"
+        sudo chown root:root "${base}/config.json"
+    fi
+
+    sudo touch "${base}/logs.file"
+    sudo chown jailer:jailer "${base}/logs.file"
+}
+
+create-vm() {
+    local uid gid
+
+    if [ -z "$id" ]; then
+        errexit "create-vm requires a VM ID"
+    fi
+
+    create-network
+    create-vm-config
+    create-hardlinks
+
+    uid=$(id -u jailer)
+    gid=$(getent group jailer | awk -F':' '{print $3}')
+
+    sudo jailer \
+         --id "$id" \
+         --daemonize \
+         --exec-file "$(which firecracker)" \
+         --uid "$uid" \
+         --gid "$gid" \
+         --chroot-base-dir "${CHROOT_BASE}" \
+         --netns "${NET_NS_DIR}/$id" \
+         --new-pid-ns \
+         -- \
+         --config-file "config.json" \
+         --log-path logs.file --level debug
+
+}
+
+stop-vm() {
+    if [ -z "$id" ]; then
+        errexit "stop-vm requires a VM ID"
+    fi
+
+    echo -n "stopping $id..."
+    pid=$(sudo cat "${CHROOT_BASE}/firecracker/${id}/root/firecracker.pid")
+
+    sudo curl \
+         --unix-socket \
+         "${CHROOT_BASE}/firecracker/$id/root/run/firecracker.socket" \
+         -H "accept: application/json" \
+         -H "Content-Type: application/json" \
+         -X PUT "http://localhost/actions" \
+         -d "{ \"action_type\": \"SendCtrlAltDel\" }"
+
+    while :
+    do
+        ps "$pid" > /dev/null || break
+        sleep 1
+        echo -n "."
+    done
+
+    echo
+    sudo rm -r "${CHROOT_BASE}/firecracker/${id}/root/firecracker.pid"
+    sudo rm -r "${CHROOT_BASE}/firecracker/${id}/root/dev"
+    sudo rm -r "${CHROOT_BASE}/firecracker/${id}/root/run"
+    sudo rm -r "${CHROOT_BASE}/firecracker/${id}/root/firecracker"
+}
+
+destroy-vm() {
+    if [ -z "$id" ]; then
+        errexit "destroy-vm requires a VM ID"
+    fi
+
+    stop-vm
+    sudo rm -fr "${CHROOT_BASE}/firecracker/${id}"
+    destroy-network
+}
+
+
+create-network() {
+    local result
+
+    if [ -z "$id" ]; then
+        errexit "create-network requires a network ID"
+    fi
+
+    if [ -f "${NET_CONFIG_DIR}/${id}.json" ] \
+           && [ -f "${NET_NS_DIR}/${id}" ]; then
+        return
+    fi
+
+    if [ ! -f "${NET_NS_DIR}/${id}" ]; then
+        sudo ip netns add "$id"
+    fi
+
+    local uid gid cniArgs
+    uid=$(id -u jailer)
+    gid=$(getent group jailer | awk -F':' '{print $3}')
+    # I've named the device tap1 because the default is tap0
+    # and it makes it easier to verify args have been passed
+    # through to the CNI plugin correctly; we can reuse the
+    # name safely because each device ends up in its own netns
+    cniArgs="IgnoreUnknown=1;TC_REDIRECT_TAP_UID=$uid;TC_REDIRECT_TAP_GID=$gid;TC_REDIRECT_TAP_NAME=tap1"
+
+    result=$(sudo CNI_PATH="/opt/cni/bin" \
+                  NETCONFPATH="/etc/cni/net.d" \
+                  CNI_ARGS="$cniArgs" \
+                  cnitool add \
+                  "$cni" \
+                  "${NET_NS_DIR}/$id")
+    # we don't pipe the cnitool straight into the file because
+    # we want to return early if we get an error without writing
+    # this file that we use to check for idempotency
+    echo "$result" | sudo tee "${NET_CONFIG_DIR}/${id}.json"
+}
+
+
+destroy-network() {
+    local networks count
+
+    if [ -z "$id" ]; then
+        errexit "destroy-network requires a network ID prefix"
+    fi
+
+    networks=$(find "$NET_CONFIG_DIR" -name "${id}*.json")
+    count=$(echo "$networks" | wc -l)
+
+    if [[ $count -gt 1 ]]; then
+        errexit "destroy-network found more than one network with prefix: $id"
+    fi
+
+    if [[ $count == 1 ]] && [[ $networks != "" ]]; then
+        id=$(basename "${networks%.json}") # expand the prefix
+    fi
+
+    sudo CNI_PATH='/opt/cni/bin' NETCONFPATH='/etc/cni/net.d' \
+         cnitool del \
+         firecracker \
+         "${NET_NS_DIR}/$id"
+
+    sudo ip netns del "$id"
+    sudo rm -f "$networks"
+}
+
+cmd=${1-unknown}
+case $cmd in
+    help|--help)        help; exit 0 ;;
+    check)              check; exit 0 ;;
+    create|create-vm)   cmd=create-vm ;;
+    destroy|destroy-vm) cmd=destroy-vm ;;
+    stop|stop-vm)       cmd=stop-vm ;;
+    create-network|destroy-network) ;;
+    unknown) help; errexit "missing command" ;;
+    *) help; errexit "unknown command: $cmd" ;;
+esac
+
+shift 1 || break
+
+while(($#)); do
+    case $1 in
+        help|--help) help; exit 0 ;;
+        --id)        id=${2-}; shift 2 || break ;;
+        --cni)       cni=${2-}; shift 2 || break ;;
+        --template)  template=${2-}; shift 2 || break ;;
+        *)
+            echo "unknown argument: $1"
+            help
+            exit 1
+    esac
+done
+
+check
+"$cmd"

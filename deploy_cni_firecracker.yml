@@ -1,0 +1,206 @@
+---
+- name: Install CNI Dependencies (except OpenSSH)
+  hosts: all
+  become: true
+  tasks:
+    - name: Install Development Tools
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - vim
+        - git
+        - curl
+        - make
+        - net-tools
+        - golang  # Assuming Go is installed using a package manager
+
+    - name: Install Tree (Optional)
+      apt:
+        name: tree
+        state: present
+        update_cache: yes
+
+    - name: Check IP Forwarding Status
+      command: cat /proc/sys/net/ipv4/ip_forward
+      register: ip_forward_status
+
+    - name: Enable IP Forwarding (persistent)
+      lineinfile:
+        path: /etc/sysctl.conf
+        line: net.ipv4.ip_forward=1
+        state: present
+        create: yes
+      when: ip_forward_status.stdout != "1"  # Only enable if not already enabled
+
+- name: Clone CNI Plugins and Build
+  hosts: all
+  become: true
+  tasks:
+    - name: Create CNI Plugins Directory
+      file:
+        path: ~/cni-plugins
+        state: directory
+        mode: 0755
+
+    - name: Clone CNI Plugins from GitHub
+      git:
+        repo: https://github.com/containernetworking/plugins.git
+        dest: ~/cni-plugins
+
+    - name: Build CNI Plugins
+      command: ./build_linux.sh
+        args:
+          chdir: ~/cni-plugins
+
+- name: Clone and Build tc-redirect-tap
+  hosts: all
+  become: true
+  tasks:
+    - name: Create tc-redirect-tap Directory
+      file:
+        path: ~/tc-redirect-tap
+        state: directory
+        mode: 0755
+
+    - name: Clone tc-redirect-tap from GitHub
+      git:
+        repo: https://github.com/awslabs/tc-redirect-tap.git
+        dest: ~/tc-redirect-tap
+
+    - name: Build tc-redirect-tap
+      make:
+        chdir: ~/tc-redirect-tap
+
+- name: Copy CNI Binaries (Improved)
+  hosts: all
+  become: true
+  tasks:
+    - name: Create Firecracker CNI Directory (if needed)
+      file:
+        path: /firecracker/cni/bin
+        state: directory
+        mode: 0755
+        when: not os.path.exists("/firecracker/cni/bin")  # Only create if missing
+
+    - name: Copy CNI Binaries to System Path Directly
+      copy:
+        src: ~/cni-plugins/bin/*
+        dest: /opt/cni/bin/
+        owner: root
+        group: root
+      when: os.path.exists("/opt/cni")  # Only copy if system CNI directory exists
+
+    - name: Copy tc-redirect-tap Binary to System Path Directly
+      copy:
+        src: ~/tc-redirect-tap/tc-redirect-tap
+        dest: /opt/cni/bin/
+        owner: root
+        group: root
+      when: os.path.exists("/opt/cni")  # Only copy if system CNI directory exists
+
+- name: Create CNI Network Configuration File
+  hosts: all
+  become: true
+  tasks:
+    - name: Create CNI Network Configuration Directory (if needed)
+      file:
+        path: /etc/cni/net.d
+        state: directory
+        mode: 0755
+        when: not os.path.exists("/etc/cni/net.d")  # Only create if missing
+
+    - name: Create Firecracker CNI Configuration File
+      template:
+        src: firecracker_cni.conf.j2
+        dest: /etc/cni/net.d/firecracker_cni.conflist
+        owner: root
+        group: root
+        mode: 0644
+
+- name: Install cnitool 
+  hosts: all
+  become: true
+  tasks:
+    - name: Use go module to install cnitool
+      go:
+        name: github.com/containernetworking/cni/cnitool
+        state: present
+
+    - name: Move cnitool to system path (optional)
+      command: mv $(go env GOPATH)/bin/cnitool /usr/local/bin
+      when: not ansible_check_mode  # Only run if not in dry run mode
+
+---
+- name: Install Firecracker
+  hosts: all
+  become: true
+  tasks:
+    - name: Set installation variables
+      set_fact:
+        install_dir: /firecracker/releases  # Customize installation directory if needed
+        bin_dir: /usr/bin                   # Customize binary destination if needed
+        release_url: https://github.com/firecracker-microvm/firecracker/releases
+        arch: "{{ ansible_arch }}"  # Use ansible variable for architecture
+
+    - name: Check if Firecracker is already installed
+      stat:
+        path: "{{ install_dir }}/{{ latest }}"
+      register: firecracker_installed
+
+    - name: Download Firecracker if not installed
+      block:
+        - name: Create installation directory
+          file:
+            path: "{{ install_dir }}"
+            state: directory
+            mode: 0755
+
+        - name: Get latest release version
+          set_fact:
+            latest: "{{ (basename (curl -fsSLI -o /dev/null -w %{url_effective} '{{ release_url }}/latest')) }}"
+
+        - name: Download Firecracker archive
+          get_url:
+            url: "{{ release_url }}/download/{{ latest }}/firecracker-{{ latest }}-{{ arch }}.tgz"
+            dest: "{{ install_dir }}/firecracker-{{ latest }}-{{ arch }}.tgz"
+            retries: 3  # Retry 3 times on download failure (optional)
+
+        - name: Decompress Firecracker archive
+          archive:
+            path: "{{ install_dir }}/firecracker-{{ latest }}-{{ arch }}.tgz"
+            extract: yes
+            dest: "{{ install_dir }}"
+            owner: root
+            group: root
+            mode: 0644
+
+        - name: Move Firecracker and jailer binaries
+          copy:
+            src: "{{ install_dir }}/release-{{ latest }}-{{ arch }}/firecracker-{{ latest }}-{{ arch }}"
+            dest: "{{ bin_dir }}/firecracker"
+            mode: 0755
+            owner: root
+            group: root
+
+          copy:
+            src: "{{ install_dir }}/release-{{ latest }}-{{ arch }}/jailer-{{ latest }}-{{ arch }}"
+            dest: "{{ bin_dir }}/jailer"
+            mode: 0755
+            owner: root
+            group: root
+
+      when: not firecracker_installed.stat.exists
+
+    - name: Verify Firecracker installation
+      debug:
+        msg: "Firecracker {{ latest }}-{{ arch }} installed successfully!"
+
+    - name: Show Firecracker version
+      command: firecracker --help | head -n 1
+      register: firecracker_version
+
+    - name: Display Firecracker version
+      debug:
+        msg: "Firecracker version: {{ firecracker_version.stdout }}"

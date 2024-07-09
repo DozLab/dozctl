@@ -1,0 +1,47 @@
+{
+  "cniVersion": "0.4.0",
+  "name": "firecracker",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "dozybr0",
+      "isGateway": true,
+      "ipam": {
+        "type": "host-local",
+        "resolvConf": "/etc/resolv.conf",
+        "dataDir": "/srv/vm/networks",
+        "subnet": "10.14.24.0/24",
+        "rangeStart": "10.14.24.10",
+        "gateway": "10.14.24.1",
+        "routes": [{ "dst": "0.0.0.0/0" }]
+      }
+    },
+    {
+      "type": "firewall"
+    },
+    {
+      "type": "portmap",
+      "name": "portmapper-fc",
+      "runtimeConfig": {
+        "portMappings": [
+          {
+            "hostPort": 61286,
+            "containerPort": 7681,
+            "protocol": "tcp"
+          },
+          {
+            "hostPort": 61286,
+            "containerPort": 7681,
+            "protocol": "udp"
+          }
+        ],
+        "aliases": [
+          "jumpserver"
+        ]
+      }
+    },
+    {
+      "type": "tc-redirect-tap"
+    }
+  ]
+}

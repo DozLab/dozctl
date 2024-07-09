@@ -1,0 +1,7 @@
+ansible setup done
+kernel download.  done
+
+
+rootfs done
+cni config make changes to the file 
+fc vm config edit the rootfs details in the vmctl file

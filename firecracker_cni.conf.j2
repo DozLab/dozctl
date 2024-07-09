@@ -1,0 +1,25 @@
+{
+  "cniVersion": "0.4.0",
+  "name": "firecracker",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "dozbr0",
+      "isDefaultGateway": true,
+      "ipam": {
+        "type": "host-local",
+        "resolvConf": "/etc/resolv.conf",
+        "dataDir": "/srv/vm/networks",
+        "subnet": "10.0.30.0/24",
+        "rangeStart": "10.0.30.32",
+        "gateway": "10.0.30.1"
+      }
+    },
+    {
+      "type": "firewall"
+    },
+    {
+      "type": "tc-redirect-tap"
+    }
+  ]
+}
