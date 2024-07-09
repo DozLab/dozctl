@@ -15,7 +15,7 @@ kernel:
 # Build the rootfs using the defined image name
 rootfs:
     @echo "Building rootfs for image: $(IMAGE)"
-    images/build_rootfs.sh $(IMAGE)
+    images/build_rootfs.sh $(IMAGE) #my-rootfs-${uuid}
 
 # Build both kernel and rootfs (default target)
 all: $(TARGETS)
