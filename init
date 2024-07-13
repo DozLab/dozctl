@@ -1,0 +1,11 @@
+ansible setup done
+kernel download.  done
+
+
+rootfs done
+cni config make changes to the file 
+fc vm config edit the rootfs details in the vmctl file
+
+setup uuid at a central point so i can use it for image download and vm setup
+
+work with error codes 166-239: These are typically unused and available for custom use by scripts.
