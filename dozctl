@@ -57,6 +57,8 @@ CNI_CONFIG_DIR="/etc/cni/net.d"
 cni="firecracker"
 id=""
 template=""
+image=""
+space=""
 
 errexit() {
     log_action "ERROR" "$1"
@@ -83,15 +85,58 @@ check() {
     log_action "INFO" "System checks passed."
 }
 
+create-rootfs() {
+    [ -z "$template" ] && template="$VM_CONFIG_DIR/config.json" 
+    space=1000
+    local rootfs_name="${FILESYSTEMS_DIR}/$(echo "$image" | cut -d '/' -f 2- | tr ':' '-')-${id}.ext4"
+    local MOUNTDIR CONTAINER_ID size
+
+    log_action "INFO" "Starting root filesystem creation."
+    sudo cp "$template" "${VM_CONFIG_DIR}/${id}.json" || errexit "Failed copying template to VM config directory."
+
+    MOUNTDIR=$(mktemp -d) || errexit "Failed creating temporary directory"
+    CONTAINER_ID=$(sudo docker run -d "$image" /bin/bash) || errexit "Failed running container"
+    # Check the size of the image and give it an additional 500MB
+    size=$(docker image ls "$image" --format "{{.Size}}") || errexit "Failed getting image size"
+    if [[ $size == *GB ]]; then 
+    size=${size%GB}
+    size=$(echo "($size * 1024)" | bc)
+    else
+    size=${size%MB} 
+    fi
+    size=$(echo $size + $space | bc)
+    # Create and format disk image
+    sudo qemu-img create -f raw "$rootfs_name" "${size}M" || errexit "Failed creating disk image"
+    sudo mkfs.ext4 "$rootfs_name" || errexit "Failed formatting disk image"
+    sudo mount "$rootfs_name" "$MOUNTDIR" || errexit "Failed mounting disk image"
+    sudo docker cp "$CONTAINER_ID:/" "$MOUNTDIR" || errexit "Failed copying container content"
+
+    # Extract files from local directory
+    (cd images/files/ && sudo tar cf - . | sudo tar xf - -C "$MOUNTDIR") || errexit "Failed extracting files"
+
+    # Create necessary directories and set ownership
+    sudo mkdir -p "$MOUNTDIR/rom" "$MOUNTDIR/overlay" || errexit "Failed creating directories"
+    sudo chown root:root "$MOUNTDIR/"* || errexit "Failed setting ownership"
+
+    # Cleanup
+    sudo umount "$MOUNTDIR" || errexit "Failed unmounting disk image"
+    rm -rf "$MOUNTDIR" || errexit "Failed removing temporary directory"
+    sudo docker rm -f "$CONTAINER_ID" || errexit "Failed removing container"
+
+    # Update VM config with the new rootfs path
+    jq "(.\"drives\"[] | select(.is_root_device == true).path_on_host) |= \"$rootfs_name\"" < "$template" | sudo tee "${VM_CONFIG_DIR}/${id}.json" > /dev/null
+    log_action "INFO" "Root filesystem creation completed successfully."
+}
+
+
 create-vm-config() {
     log_action "INFO" "Creating VM configuration for VM ID: $id with template: $template."
-    [ -z "$template" ] && errexit "creating the VM config requires a --template"
+    # [ -z "$template" ] && errexit "creating the VM config requires a --template"
     [ -z "$id" ] && errexit "creating the VM config requires a VM ID"
     [ ! -f "${NET_CONFIG_DIR}/${id}.json" ] && errexit "network configuration for $id not found"
     [ ! -f "$template" ] && errexit "could not find VM config template $template"
 
-    sudo cp "$template" "${VM_CONFIG_DIR}/${id}.json"
-    log_action "INFO" "Copied template to VM configuration directory."
+    [ ! -f "${VM_CONFIG_DIR}/${id}.json" ] && sudo cp "$template" "${VM_CONFIG_DIR}/${id}.json" && log_action "INFO" "Copied template to VM configuration directory."
 
     local boot_args mask mac ip gateway_ip _netcfg
 
@@ -111,6 +156,7 @@ create-vm-config() {
           " < "$template" | sudo tee "${VM_CONFIG_DIR}/${id}.json" > /dev/null
     log_action "INFO" "Created VM configuration with boot arguments and network interfaces."
 }
+
 
 create-hardlinks() {
     log_action "INFO" "Creating hardlinks for VM ID: $id."
@@ -145,6 +191,7 @@ create-vm() {
     log_action "INFO" "Creating VM with ID: $id."
     [ -z "$id" ] && errexit "create-vm requires a VM ID"
 
+    create-rootfs
     create-network
     create-vm-config
     create-hardlinks
@@ -277,6 +324,7 @@ while (($#)); do
         help|--help) help; exit 0 ;;
         --id)        id=${2-}; shift 2 || break ;;
         --cni)       cni=${2-}; shift 2 || break ;;
+        --image)     image=${2-}; shift 2 || break ;;
         --template)  template=${2-}; shift 2 || break ;;
         *) errexit "unknown argument: $1" ;;
     esac
