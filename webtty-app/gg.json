@@ -1,0 +1,45 @@
+{
+  "kind": "cniCacheV1",
+  "containerId": "cnitool-0b14f65443f789eaee71",
+  "config": "ewogICJjbmlWZXJzaW9uIjogIjAuNC4wIiwKICAibmFtZSI6ICJmaXJlY3JhY2tlciIsCiAgInBsdWdpbnMiOiBbCiAgICB7CiAgICAgICJ0eXBlIjogImJyaWRnZSIsCiAgICAgICJicmlkZ2UiOiAiZG96YnIwIiwKICAgICAgImlzRGVmYXVsdEdhdGV3YXkiOiB0cnVlLAogICAgICAiaXBhbSI6IHsKICAgICAgICAidHlwZSI6ICJob3N0LWxvY2FsIiwKICAgICAgICAicmVzb2x2Q29uZiI6ICIvZXRjL3Jlc29sdi5jb25mIiwKICAgICAgICAiZGF0YURpciI6ICIvc3J2L3ZtL25ldHdvcmtzIiwKICAgICAgICAic3VibmV0IjogIjEwLjAuMzAuMC8yNCIsCiAgICAgICAgInJhbmdlU3RhcnQiOiAiMTAuMC4zMC4zMiIsCiAgICAgICAgImdhdGV3YXkiOiAiMTAuMC4zMC4xIgogICAgICB9CiAgICB9LAogICAgewogICAgICAidHlwZSI6ICJmaXJld2FsbCIKICAgIH0sCiAgICB7CiAgICAgICJ0eXBlIjogInRjLXJlZGlyZWN0LXRhcCIKICAgIH0KICBdCn0K",
+  "ifName": "eth0",
+  "networkName": "firecracker",
+  "netns": "/var/run/netns/cbc39e5d-9bb4-4600-8e3f-0ae4cb19d4a9",
+  "cniArgs": [
+    ["IgnoreUnknown", "1"],
+    ["TC_REDIRECT_TAP_UID", "1001"],
+    ["TC_REDIRECT_TAP_GID", "1001"],
+    ["TC_REDIRECT_TAP_NAME", "tap1"]
+  ],
+  "result": {
+    "cniVersion": "1.0.0",
+    "dns": {
+      "nameservers": ["127.0.0.53"],
+      "options": ["edns0", "trust-ad"],
+      "search": ["."]
+    },
+    "interfaces": [
+      { "mac": "7a:2a:08:4d:91:42", "name": "dozbr0" },
+      { "mac": "da:79:f1:4e:80:78", "name": "veth31d244fc" },
+      {
+        "mac": "6a:db:40:29:b5:30",
+        "name": "eth0",
+        "sandbox": "/var/run/netns/cbc39e5d-9bb4-4600-8e3f-0ae4cb19d4a9"
+      },
+      {
+        "name": "tap1",
+        "sandbox": "/var/run/netns/cbc39e5d-9bb4-4600-8e3f-0ae4cb19d4a9"
+      },
+      {
+        "mac": "6a:db:40:29:b5:30",
+        "name": "tap1",
+        "sandbox": "cnitool-0b14f65443f789eaee71"
+      }
+    ],
+    "ips": [
+      { "address": "10.0.30.35/24", "gateway": "10.0.30.1", "interface": 2 },
+      { "address": "10.0.30.35/24", "gateway": "10.0.30.1", "interface": 4 }
+    ],
+    "routes": [{ "dst": "0.0.0.0/0", "gw": "10.0.30.1" }]
+  }
+}
